@@ -1,0 +1,13 @@
+better-exceptions
+future
+numpy<2.0
+opencv-python
+pandas
+tqdm
+yacs
+tensorboard
+torch
+torchvision
+pretrainedmodels==0.7.4
+imgaug==0.4.0
+dlib

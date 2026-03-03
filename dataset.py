@@ -2,6 +2,7 @@ import argparse
 import better_exceptions
 from pathlib import Path
 import numpy as np
+np.bool = bool  # fix imgaug compatibility with numpy >= 1.24
 import pandas as pd
 import torch
 import cv2
@@ -21,7 +22,7 @@ class ImgAugTransform:
                 scale={"x": (0.95, 1.05), "y": (0.95, 1.05)},
                 translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)}
             ),
-            iaa.AddToHueAndSaturation(value=(-10, 10), per_channel=True),
+            iaa.Add((-10, 10), per_channel=True),
             iaa.GammaContrast((0.3, 2)),
             iaa.Fliplr(0.5),
         ])

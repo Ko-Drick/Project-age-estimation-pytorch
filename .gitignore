@@ -2,3 +2,6 @@ __pycache__/
 .venv/
 appa-real-release/
 CLAUDE.md
+.DS_Store
+misc/epoch044_0.02343_3.9984.pth
+tf_log/
