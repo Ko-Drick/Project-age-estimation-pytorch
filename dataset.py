@@ -10,6 +10,10 @@ from torch.utils.data import Dataset
 from imgaug import augmenters as iaa
 
 
+def _identity(i):
+    return i
+
+
 class ImgAugTransform:
     def __init__(self):
         self.aug = iaa.Sequential([
@@ -45,7 +49,7 @@ class FaceDataset(Dataset):
         if augment:
             self.transform = ImgAugTransform()
         else:
-            self.transform = lambda i: i
+            self.transform = _identity
 
         self.x = []
         self.y = []
