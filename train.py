@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import pretrainedmodels
 import pretrainedmodels.utils
-from model import get_model
+from model import get_model, get_regression_model
 from dataset import FaceDataset
 from defaults import _C as cfg
 
@@ -53,7 +53,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device):
+def train_classification(train_loader, model, criterion, optimizer, epoch, device):
     model.train()
     loss_monitor = AverageMeter()
     accuracy_monitor = AverageMeter()
@@ -63,23 +63,17 @@ def train(train_loader, model, criterion, optimizer, epoch, device):
             x = x.to(device)
             y = y.to(device)
 
-            # compute output
             outputs = model(x)
-
-            # calc loss
             loss = criterion(outputs, y)
             cur_loss = loss.item()
 
-            # calc accuracy
             _, predicted = outputs.max(1)
             correct_num = predicted.eq(y).sum().item()
 
-            # measure accuracy and record loss
             sample_num = x.size(0)
             loss_monitor.update(cur_loss, sample_num)
             accuracy_monitor.update(correct_num, sample_num)
 
-            # compute gradient and do SGD step
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -90,7 +84,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device):
     return loss_monitor.avg, accuracy_monitor.avg
 
 
-def validate(validate_loader, model, criterion, epoch, device):
+def validate_classification(validate_loader, model, criterion, epoch, device):
     model.eval()
     loss_monitor = AverageMeter()
     accuracy_monitor = AverageMeter()
@@ -103,22 +97,17 @@ def validate(validate_loader, model, criterion, epoch, device):
                 x = x.to(device)
                 y = y.to(device)
 
-                # compute output
                 outputs = model(x)
                 preds.append(F.softmax(outputs, dim=-1).cpu().numpy())
                 gt.append(y.cpu().numpy())
 
-                # valid for validation, not used for test
                 if criterion is not None:
-                    # calc loss
                     loss = criterion(outputs, y)
                     cur_loss = loss.item()
 
-                    # calc accuracy
                     _, predicted = outputs.max(1)
                     correct_num = predicted.eq(y).sum().item()
 
-                    # measure accuracy and record loss
                     sample_num = x.size(0)
                     loss_monitor.update(cur_loss, sample_num)
                     accuracy_monitor.update(correct_num, sample_num)
@@ -135,6 +124,64 @@ def validate(validate_loader, model, criterion, epoch, device):
     return loss_monitor.avg, accuracy_monitor.avg, mae
 
 
+def train_regression(train_loader, model, criterion, optimizer, epoch, device):
+    model.train()
+    loss_monitor = AverageMeter()
+
+    with tqdm(train_loader) as _tqdm:
+        for x, y in _tqdm:
+            x = x.to(device)
+            y = y.to(device).float()
+
+            outputs = model(x).squeeze(1)
+            loss = criterion(outputs, y)
+            cur_loss = loss.item()
+
+            sample_num = x.size(0)
+            loss_monitor.update(cur_loss, sample_num)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            _tqdm.set_postfix(OrderedDict(stage="train", epoch=epoch, loss=loss_monitor.avg),
+                              sample_num=sample_num)
+
+    return loss_monitor.avg
+
+
+def validate_regression(validate_loader, model, criterion, epoch, device):
+    model.eval()
+    loss_monitor = AverageMeter()
+    preds = []
+    gt = []
+
+    with torch.no_grad():
+        with tqdm(validate_loader) as _tqdm:
+            for i, (x, y) in enumerate(_tqdm):
+                x = x.to(device)
+                y = y.to(device).float()
+
+                outputs = model(x).squeeze(1)
+                preds.append(outputs.cpu().numpy())
+                gt.append(y.cpu().numpy())
+
+                if criterion is not None:
+                    loss = criterion(outputs, y)
+                    cur_loss = loss.item()
+
+                    sample_num = x.size(0)
+                    loss_monitor.update(cur_loss, sample_num)
+                    _tqdm.set_postfix(OrderedDict(stage="val", epoch=epoch, loss=loss_monitor.avg),
+                                      sample_num=sample_num)
+
+    preds = np.concatenate(preds, axis=0)
+    gt = np.concatenate(gt, axis=0)
+    mae = np.abs(preds - gt).mean()
+
+    return loss_monitor.avg, mae
+
+
 def main():
     args = get_args()
 
@@ -146,9 +193,16 @@ def main():
     checkpoint_dir = Path(args.checkpoint)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    mode = cfg.MODEL.MODE
+    assert mode in ("classification", "regression"), f"Unknown mode: {mode}"
+    print("=> mode: {}".format(mode))
+
     # create model
     print("=> creating model '{}'".format(cfg.MODEL.ARCH))
-    model = get_model(model_name=cfg.MODEL.ARCH)
+    if mode == "classification":
+        model = get_model(model_name=cfg.MODEL.ARCH)
+    else:
+        model = get_regression_model(model_name=cfg.MODEL.ARCH)
 
     if cfg.TRAIN.OPT == "sgd":
         optimizer = torch.optim.SGD(model.parameters(), lr=cfg.TRAIN.LR,
@@ -168,10 +222,11 @@ def main():
             print("=> loading checkpoint '{}'".format(resume_path))
             checkpoint = torch.load(resume_path, map_location="cpu")
             start_epoch = checkpoint['epoch']
-            model.load_state_dict(checkpoint['state_dict'])
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(resume_path, checkpoint['epoch']))
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if checkpoint.get('mode', mode) == mode:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         else:
             print("=> no checkpoint found at '{}'".format(resume_path))
 
@@ -181,15 +236,25 @@ def main():
     if device == "cuda":
         cudnn.benchmark = True
 
-    criterion = nn.CrossEntropyLoss().to(device)
+    # datasets — labels differ between modes
     train_dataset = FaceDataset(args.data_dir, "train", img_size=cfg.MODEL.IMG_SIZE, augment=True,
-                                age_stddev=cfg.TRAIN.AGE_STDDEV)
+                                age_stddev=cfg.TRAIN.AGE_STDDEV, mode=mode)
     train_loader = DataLoader(train_dataset, batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True,
                               num_workers=cfg.TRAIN.WORKERS, drop_last=True)
 
-    val_dataset = FaceDataset(args.data_dir, "valid", img_size=cfg.MODEL.IMG_SIZE, augment=False)
+    val_dataset = FaceDataset(args.data_dir, "valid", img_size=cfg.MODEL.IMG_SIZE, augment=False, mode=mode)
     val_loader = DataLoader(val_dataset, batch_size=cfg.TEST.BATCH_SIZE, shuffle=False,
                             num_workers=cfg.TRAIN.WORKERS, drop_last=False)
+
+    # criterion
+    if mode == "classification":
+        criterion = nn.CrossEntropyLoss().to(device)
+    else:
+        criterion = nn.L1Loss().to(device)
+
+    # checkpoints saved in a subfolder named after the mode
+    checkpoint_dir = checkpoint_dir / mode
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     scheduler = StepLR(optimizer, step_size=cfg.TRAIN.LR_DECAY_STEP, gamma=cfg.TRAIN.LR_DECAY_RATE,
                        last_epoch=start_epoch - 1)
@@ -198,22 +263,24 @@ def main():
 
     if args.tensorboard is not None:
         opts_prefix = "_".join(args.opts)
-        train_writer = SummaryWriter(log_dir=args.tensorboard + "/" + opts_prefix + "_train")
-        val_writer = SummaryWriter(log_dir=args.tensorboard + "/" + opts_prefix + "_val")
+        train_writer = SummaryWriter(log_dir=args.tensorboard + f"/{mode}/" + opts_prefix + "_train")
+        val_writer = SummaryWriter(log_dir=args.tensorboard + f"/{mode}/" + opts_prefix + "_val")
 
     for epoch in range(start_epoch, cfg.TRAIN.EPOCHS):
-        # train
-        train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch, device)
-
-        # validate
-        val_loss, val_acc, val_mae = validate(val_loader, model, criterion, epoch, device)
+        if mode == "classification":
+            train_loss, train_acc = train_classification(train_loader, model, criterion, optimizer, epoch, device)
+            val_loss, val_acc, val_mae = validate_classification(val_loader, model, criterion, epoch, device)
+        else:
+            train_loss = train_regression(train_loader, model, criterion, optimizer, epoch, device)
+            val_loss, val_mae = validate_regression(val_loader, model, criterion, epoch, device)
 
         if args.tensorboard is not None:
             train_writer.add_scalar("loss", train_loss, epoch)
-            train_writer.add_scalar("acc", train_acc, epoch)
             val_writer.add_scalar("loss", val_loss, epoch)
-            val_writer.add_scalar("acc", val_acc, epoch)
             val_writer.add_scalar("mae", val_mae, epoch)
+            if mode == "classification":
+                train_writer.add_scalar("acc", train_acc, epoch)
+                val_writer.add_scalar("acc", val_acc, epoch)
 
         # checkpoint
         if val_mae < best_val_mae:
@@ -223,6 +290,7 @@ def main():
                 {
                     'epoch': epoch + 1,
                     'arch': cfg.MODEL.ARCH,
+                    'mode': mode,
                     'state_dict': model_state_dict,
                     'optimizer_state_dict': optimizer.state_dict()
                 },
