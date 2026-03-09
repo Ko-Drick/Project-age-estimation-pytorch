@@ -19,6 +19,15 @@ def get_regression_model(model_name="se_resnext50_32x4d", pretrained="imagenet")
     return model
 
 
+def get_gaussian_model(model_name="se_resnext50_32x4d", pretrained="imagenet"):
+    """Outputs 2 values per sample: predicted age (mean) + log variance."""
+    model = pretrainedmodels.__dict__[model_name](pretrained=pretrained)
+    dim_feats = model.last_linear.in_features
+    model.last_linear = nn.Linear(dim_feats, 2)
+    model.avg_pool = nn.AdaptiveAvgPool2d(1)
+    return model
+
+
 def main():
     model = get_model()
     print(model)

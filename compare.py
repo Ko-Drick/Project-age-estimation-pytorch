@@ -1,11 +1,12 @@
 """
-Compare classification and regression models on the test set.
+Compare classification, regression and gaussian models on the test set.
 
 Usage:
     python compare.py \
         --data_dir appa-real-release \
         --classif_checkpoint checkpoint/classification/epochXXX_*.pth \
-        --regress_checkpoint checkpoint/regression/epochXXX_*.pth
+        --regress_checkpoint checkpoint/regression/epochXXX_*.pth \
+        --gaussian_checkpoint checkpoint/gaussian/epochXXX_*.pth  # optional
 """
 import argparse
 import numpy as np
@@ -14,7 +15,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model import get_model, get_regression_model
+from model import get_model, get_regression_model, get_gaussian_model
 from dataset import FaceDataset
 from defaults import _C as cfg
 
@@ -24,6 +25,7 @@ def get_args():
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--classif_checkpoint", type=str, required=True)
     parser.add_argument("--regress_checkpoint", type=str, required=True)
+    parser.add_argument("--gaussian_checkpoint", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
     return parser.parse_args()
@@ -61,6 +63,24 @@ def evaluate_regression(model, loader, device):
     return mae
 
 
+def evaluate_gaussian(model, loader, device):
+    model.eval()
+    means, stds, gt = [], [], []
+    with torch.no_grad():
+        for x, y in tqdm(loader, desc="Gaussian"):
+            x = x.to(device)
+            outputs = model(x)
+            means.append(outputs[:, 0].cpu().numpy())
+            stds.append(torch.exp(0.5 * outputs[:, 1]).cpu().numpy())
+            gt.append(y.numpy())
+    means = np.concatenate(means, axis=0)
+    stds = np.concatenate(stds, axis=0)
+    gt = np.concatenate(gt, axis=0)
+    mae = np.abs(means - gt).mean()
+    avg_std = stds.mean()
+    return mae, avg_std
+
+
 def main():
     args = get_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -77,7 +97,6 @@ def main():
                                   augment=False, mode="classification")
     classif_loader = DataLoader(classif_dataset, batch_size=args.batch_size,
                                 shuffle=False, num_workers=args.workers)
-
     classif_mae = evaluate_classification(classif_model, classif_loader, device)
 
     # --- Regression ---
@@ -91,18 +110,41 @@ def main():
                                   augment=False, mode="regression")
     regress_loader = DataLoader(regress_dataset, batch_size=args.batch_size,
                                 shuffle=False, num_workers=args.workers)
-
     regress_mae = evaluate_regression(regress_model, regress_loader, device)
 
+    # --- Gaussian (optional) ---
+    gaussian_mae = None
+    gaussian_std = None
+    if args.gaussian_checkpoint:
+        gaussian_ckpt = torch.load(args.gaussian_checkpoint, map_location="cpu")
+
+        gaussian_model = get_gaussian_model(model_name=arch, pretrained=None)
+        gaussian_model.load_state_dict(gaussian_ckpt["state_dict"])
+        gaussian_model = gaussian_model.to(device)
+
+        gaussian_dataset = FaceDataset(args.data_dir, "test", img_size=cfg.MODEL.IMG_SIZE,
+                                       augment=False, mode="gaussian")
+        gaussian_loader = DataLoader(gaussian_dataset, batch_size=args.batch_size,
+                                     shuffle=False, num_workers=args.workers)
+        gaussian_mae, gaussian_std = evaluate_gaussian(gaussian_model, gaussian_loader, device)
+
     # --- Results ---
-    print("\n" + "=" * 40)
-    print(f"{'Model':<20} {'Test MAE':>10}")
-    print("-" * 40)
-    print(f"{'Classification':<20} {classif_mae:>10.4f}")
-    print(f"{'Regression':<20} {regress_mae:>10.4f}")
-    print("=" * 40)
-    winner = "Classification" if classif_mae < regress_mae else "Regression"
-    print(f"=> Best model: {winner} (Δ MAE = {abs(classif_mae - regress_mae):.4f})")
+    print("\n" + "=" * 50)
+    print(f"{'Model':<20} {'Test MAE':>10} {'Avg Std':>10}")
+    print("-" * 50)
+    print(f"{'Classification':<20} {classif_mae:>10.4f} {'N/A':>10}")
+    print(f"{'Regression':<20} {regress_mae:>10.4f} {'N/A':>10}")
+    if gaussian_mae is not None:
+        print(f"{'Gaussian NLL':<20} {gaussian_mae:>10.4f} {gaussian_std:>10.4f}")
+    print("=" * 50)
+
+    results = {"Classification": classif_mae, "Regression": regress_mae}
+    if gaussian_mae is not None:
+        results["Gaussian NLL"] = gaussian_mae
+    winner = min(results, key=results.get)
+    best = results[winner]
+    second = sorted(results.values())[1]
+    print(f"=> Best model: {winner} (Δ MAE = {abs(best - second):.4f})")
 
 
 if __name__ == "__main__":
