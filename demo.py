@@ -14,6 +14,7 @@ import torch.utils.data
 import torch.nn.functional as F
 from model import get_model
 from defaults import _C as cfg
+from tta import TTAWrapper
 
 
 def get_args():
@@ -27,6 +28,8 @@ def get_args():
                         help="Target image directory; if set, images in image_dir are used instead of webcam")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory to which resulting images will be stored if set")
+    parser.add_argument("--tta", action="store_true",
+                        help="Enable Test-Time Augmentation (4 transforms averaged)")
     parser.add_argument("opts", default=[], nargs=argparse.REMAINDER,
                         help="Modify config options using the command-line")
     args = parser.parse_args()
@@ -121,6 +124,11 @@ def main():
         cudnn.benchmark = True
 
     model.eval()
+
+    if args.tta:
+        tta = TTAWrapper(model, mode="classification")
+        print("=> TTA enabled (4 transforms)")
+
     margin = args.margin
     img_dir = args.img_dir
     detector = dlib.get_frontal_face_detector()
@@ -149,7 +157,10 @@ def main():
 
                 # predict ages
                 inputs = torch.from_numpy(np.transpose(faces.astype(np.float32), (0, 3, 1, 2))).to(device)
-                outputs = F.softmax(model(inputs), dim=-1).cpu().numpy()
+                if args.tta:
+                    outputs = tta.predict(inputs).cpu().numpy()
+                else:
+                    outputs = F.softmax(model(inputs), dim=-1).cpu().numpy()
                 ages = np.arange(0, 101)
                 predicted_ages = (outputs * ages).sum(axis=-1)
 
