@@ -28,6 +28,7 @@ def get_args():
     parser.add_argument("--classif_checkpoint", type=str, required=True)
     parser.add_argument("--regress_checkpoint", type=str, required=True)
     parser.add_argument("--gaussian_checkpoint", type=str, default=None)
+    parser.add_argument("--label_smoothing_checkpoint", type=str, default=None)
     parser.add_argument("--residual_checkpoint", type=str, default=None)
     parser.add_argument("--tta", action="store_true", help="Enable Test-Time Augmentation")
     parser.add_argument("--batch_size", type=int, default=64)
@@ -145,6 +146,27 @@ def main():
         gaussian_mae = evaluate_gaussian(gaussian_predict, gaussian_loader, device,
                                          label=f"Gaussian{tta_suffix}")
 
+    # --- Label Smoothing (optional) ---
+    label_smoothing_mae = None
+    if args.label_smoothing_checkpoint:
+        ls_ckpt = torch.load(args.label_smoothing_checkpoint, map_location="cpu")
+
+        ls_model = get_model(model_name=arch, pretrained=None)
+        ls_model.load_state_dict(ls_ckpt["state_dict"])
+        ls_model = ls_model.to(device).eval()
+
+        if args.tta:
+            tta_ls = TTAWrapper(ls_model, mode="classification")
+            ls_predict = lambda x: tta_ls.predict(x)
+        else:
+            ls_predict = lambda x: F.softmax(ls_model(x), dim=-1)
+
+        ls_loader = DataLoader(
+            FaceDataset(args.data_dir, "test", img_size=cfg.MODEL.IMG_SIZE, augment=False, mode="classification"),
+            batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+        label_smoothing_mae = evaluate_classification(ls_predict, ls_loader, device,
+                                                      label=f"Label Smoothing{tta_suffix}")
+
     # --- Residual DEX (optional) ---
     residual_mae = None
     if args.residual_checkpoint:
@@ -176,6 +198,8 @@ def main():
     print(f"{'Regression':<25} {regress_mae:>10.4f}  {'yes' if args.tta else 'no'}")
     if gaussian_mae is not None:
         print(f"{'Gaussian NLL':<25} {gaussian_mae:>10.4f}  {'yes' if args.tta else 'no'}")
+    if label_smoothing_mae is not None:
+        print(f"{'Label Smoothing':<25} {label_smoothing_mae:>10.4f}  {'yes' if args.tta else 'no'}")
     if residual_mae is not None:
         print(f"{'Residual DEX':<25} {residual_mae:>10.4f}  {'yes' if args.tta else 'no'}")
     print("=" * 45)
@@ -183,6 +207,8 @@ def main():
     results = {"Classification": classif_mae, "Regression": regress_mae}
     if gaussian_mae is not None:
         results["Gaussian NLL"] = gaussian_mae
+    if label_smoothing_mae is not None:
+        results["Label Smoothing"] = label_smoothing_mae
     if residual_mae is not None:
         results["Residual DEX"] = residual_mae
     winner = min(results, key=results.get)

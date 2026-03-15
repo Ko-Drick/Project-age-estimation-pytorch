@@ -12,7 +12,7 @@ import pretrainedmodels.utils
 from model import get_model
 from dataset import FaceDataset
 from defaults import _C as cfg
-from train import validate
+from train import validate_classification as validate
 
 
 def get_args():
