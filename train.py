@@ -16,9 +16,31 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import pretrainedmodels
 import pretrainedmodels.utils
-from model import get_model, get_regression_model, get_gaussian_model
+from model import get_model, get_regression_model, get_gaussian_model, get_residual_dex_model
 from dataset import FaceDataset
 from defaults import _C as cfg
+
+
+class GaussianLabelSmoothingLoss(nn.Module):
+    """Cross-entropy with Gaussian soft targets centered on the true age class.
+
+    Instead of a one-hot target, each sample gets a Gaussian distribution over
+    the 101 age classes (σ = label_smoothing in years), which respects the
+    ordinal structure of age labels.
+    """
+    def __init__(self, num_classes=101, sigma=2.0):
+        super().__init__()
+        self.sigma = sigma
+        ages = torch.arange(num_classes).float()
+        self.register_buffer('ages', ages)
+
+    def forward(self, logits, targets):
+        ages = self.ages.unsqueeze(0)                      # (1, 101)
+        mu = targets.float().unsqueeze(1)                  # (B, 1)
+        soft_targets = torch.exp(-0.5 * ((ages - mu) / self.sigma) ** 2)
+        soft_targets = soft_targets / soft_targets.sum(dim=1, keepdim=True)
+        log_probs = F.log_softmax(logits, dim=1)
+        return -(soft_targets * log_probs).sum(dim=1).mean()
 
 
 def get_args():
@@ -251,6 +273,63 @@ def validate_gaussian(validate_loader, model, epoch, device):
     return loss_monitor.avg, mae, avg_std
 
 
+def train_residual_dex(train_loader, model, optimizer, epoch, device):
+    model.train()
+    loss_monitor = AverageMeter()
+    ages_tensor = torch.arange(0, 101, dtype=torch.float32).to(device)
+
+    with tqdm(train_loader) as _tqdm:
+        for x, y in _tqdm:
+            x = x.to(device)
+            y = y.to(device).float()
+
+            logits, residuals = model(x)
+            probs = F.softmax(logits, dim=1)
+            predicted_age = (probs * (ages_tensor + residuals)).sum(dim=1)
+            loss = F.l1_loss(predicted_age, y)
+
+            loss_monitor.update(loss.item(), x.size(0))
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            _tqdm.set_postfix(OrderedDict(stage="train", epoch=epoch, loss=loss_monitor.avg),
+                              sample_num=x.size(0))
+
+    return loss_monitor.avg
+
+
+def validate_residual_dex(validate_loader, model, epoch, device):
+    model.eval()
+    loss_monitor = AverageMeter()
+    preds = []
+    gt = []
+    ages_tensor = torch.arange(0, 101, dtype=torch.float32).to(device)
+
+    with torch.no_grad():
+        with tqdm(validate_loader) as _tqdm:
+            for i, (x, y) in enumerate(_tqdm):
+                x = x.to(device)
+                y = y.to(device).float()
+
+                logits, residuals = model(x)
+                probs = F.softmax(logits, dim=1)
+                predicted_age = (probs * (ages_tensor + residuals)).sum(dim=1)
+
+                preds.append(predicted_age.cpu().numpy())
+                gt.append(y.cpu().numpy())
+
+                loss = F.l1_loss(predicted_age, y)
+                loss_monitor.update(loss.item(), x.size(0))
+                _tqdm.set_postfix(OrderedDict(stage="val", epoch=epoch, loss=loss_monitor.avg),
+                                  sample_num=x.size(0))
+
+    preds = np.concatenate(preds, axis=0)
+    gt = np.concatenate(gt, axis=0)
+    mae = np.abs(preds - gt).mean()
+    return loss_monitor.avg, mae
+
+
 def main():
     args = get_args()
 
@@ -263,7 +342,7 @@ def main():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     mode = cfg.MODEL.MODE
-    assert mode in ("classification", "regression", "gaussian"), f"Unknown mode: {mode}"
+    assert mode in ("classification", "regression", "gaussian", "residual_dex"), f"Unknown mode: {mode}"
     print("=> mode: {}".format(mode))
 
     # create model
@@ -272,8 +351,10 @@ def main():
         model = get_model(model_name=cfg.MODEL.ARCH)
     elif mode == "regression":
         model = get_regression_model(model_name=cfg.MODEL.ARCH)
-    else:
+    elif mode == "gaussian":
         model = get_gaussian_model(model_name=cfg.MODEL.ARCH)
+    else:
+        model = get_residual_dex_model(model_name=cfg.MODEL.ARCH)
 
     if cfg.TRAIN.OPT == "sgd":
         optimizer = torch.optim.SGD(model.parameters(), lr=cfg.TRAIN.LR,
@@ -292,7 +373,14 @@ def main():
         if Path(resume_path).is_file():
             print("=> loading checkpoint '{}'".format(resume_path))
             checkpoint = torch.load(resume_path, map_location="cpu")
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
+            model_sd = model.state_dict()
+            state_dict = {}
+            for k, v in checkpoint['state_dict'].items():
+                if k in model_sd and v.shape == model_sd[k].shape:
+                    state_dict[k] = v
+                elif f"backbone.{k}" in model_sd and v.shape == model_sd[f"backbone.{k}"].shape:
+                    state_dict[f"backbone.{k}"] = v
+            model.load_state_dict(state_dict, strict=False)
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(resume_path, checkpoint['epoch']))
             if checkpoint.get('mode', mode) == mode:
@@ -317,9 +405,13 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=cfg.TEST.BATCH_SIZE, shuffle=False,
                             num_workers=cfg.TRAIN.WORKERS, drop_last=False)
 
-    # criterion (gaussian uses its own loss function, no criterion object needed)
+    # criterion (gaussian and residual_dex use their own loss, no criterion object needed)
     if mode == "classification":
-        criterion = nn.CrossEntropyLoss().to(device)
+        if cfg.TRAIN.LABEL_SMOOTHING > 0:
+            print(f"=> using Gaussian label smoothing (sigma={cfg.TRAIN.LABEL_SMOOTHING})")
+            criterion = GaussianLabelSmoothingLoss(num_classes=101, sigma=cfg.TRAIN.LABEL_SMOOTHING).to(device)
+        else:
+            criterion = nn.CrossEntropyLoss().to(device)
     elif mode == "regression":
         criterion = nn.L1Loss().to(device)
     else:
@@ -346,10 +438,13 @@ def main():
         elif mode == "regression":
             train_loss = train_regression(train_loader, model, criterion, optimizer, epoch, device)
             val_loss, val_mae = validate_regression(val_loader, model, criterion, epoch, device)
-        else:
+        elif mode == "gaussian":
             train_loss = train_gaussian(train_loader, model, optimizer, epoch, device)
             val_loss, val_mae, val_std = validate_gaussian(val_loader, model, epoch, device)
             print(f"=> [epoch {epoch:03d}] avg predicted std: {val_std:.3f}")
+        else:  # residual_dex
+            train_loss = train_residual_dex(train_loader, model, optimizer, epoch, device)
+            val_loss, val_mae = validate_residual_dex(val_loader, model, epoch, device)
 
         if args.tensorboard is not None:
             train_writer.add_scalar("loss", train_loss, epoch)
@@ -358,7 +453,7 @@ def main():
             if mode == "classification":
                 train_writer.add_scalar("acc", train_acc, epoch)
                 val_writer.add_scalar("acc", val_acc, epoch)
-            if mode == "gaussian":
+            elif mode == "gaussian":
                 val_writer.add_scalar("avg_std", val_std, epoch)
 
         # checkpoint

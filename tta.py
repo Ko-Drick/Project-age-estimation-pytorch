@@ -51,7 +51,7 @@ class TTAWrapper:
             mode:       "classification", "regression" or "gaussian"
             transforms: list of (name, fn) pairs — defaults to DEFAULT_TRANSFORMS
         """
-        assert mode in ("classification", "regression", "gaussian"), f"Unknown mode: {mode}"
+        assert mode in ("classification", "regression", "gaussian", "residual_dex"), f"Unknown mode: {mode}"
         self.model = model
         self.mode = mode
         self.transforms = transforms if transforms is not None else DEFAULT_TRANSFORMS
@@ -65,11 +65,7 @@ class TTAWrapper:
             regression     -> averaged age predictions        (B,)
             gaussian       -> averaged mean predictions       (B,)
         """
-        all_outputs = []
-
-        for _, transform in self.transforms:
-            out = self.model(transform(x))
-            all_outputs.append(out)
+        all_outputs = [self.model(transform(x)) for _, transform in self.transforms]
 
         if self.mode == "classification":
             probs = [F.softmax(o, dim=-1) for o in all_outputs]
@@ -77,6 +73,13 @@ class TTAWrapper:
         elif self.mode == "regression":
             preds = [o.squeeze(1) for o in all_outputs]
             return torch.stack(preds).mean(0)
-        else:  # gaussian
+        elif self.mode == "gaussian":
             means = [o[:, 0] for o in all_outputs]
             return torch.stack(means).mean(0)
+        else:  # residual_dex
+            ages = torch.arange(0, 101, dtype=torch.float32).to(next(self.model.parameters()).device)
+            preds = []
+            for logits, residuals in all_outputs:
+                probs = F.softmax(logits, dim=1)
+                preds.append((probs * (ages + residuals)).sum(dim=1))
+            return torch.stack(preds).mean(0)

@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model import get_model, get_regression_model, get_gaussian_model
+from model import get_model, get_regression_model, get_gaussian_model, get_residual_dex_model
 from dataset import FaceDataset
 from defaults import _C as cfg
 from tta import TTAWrapper
@@ -28,6 +28,7 @@ def get_args():
     parser.add_argument("--classif_checkpoint", type=str, required=True)
     parser.add_argument("--regress_checkpoint", type=str, required=True)
     parser.add_argument("--gaussian_checkpoint", type=str, default=None)
+    parser.add_argument("--residual_checkpoint", type=str, default=None)
     parser.add_argument("--tta", action="store_true", help="Enable Test-Time Augmentation")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
@@ -144,6 +145,29 @@ def main():
         gaussian_mae = evaluate_gaussian(gaussian_predict, gaussian_loader, device,
                                          label=f"Gaussian{tta_suffix}")
 
+    # --- Residual DEX (optional) ---
+    residual_mae = None
+    if args.residual_checkpoint:
+        residual_ckpt = torch.load(args.residual_checkpoint, map_location="cpu")
+
+        residual_model = get_residual_dex_model(model_name=arch, pretrained=None)
+        residual_model.load_state_dict(residual_ckpt["state_dict"])
+        residual_model = residual_model.to(device).eval()
+
+        if args.tta:
+            tta_residual = TTAWrapper(residual_model, mode="residual_dex")
+            residual_predict = lambda x: tta_residual.predict(x)
+        else:
+            ages = torch.arange(0, 101, dtype=torch.float32).to(device)
+            residual_predict = lambda x: (lambda lg, res: (torch.softmax(lg, dim=1) * (ages + res)).sum(dim=1))(*residual_model(x))
+
+        residual_dataset = FaceDataset(args.data_dir, "test", img_size=cfg.MODEL.IMG_SIZE,
+                                       augment=False, mode="residual_dex")
+        residual_loader = DataLoader(residual_dataset, batch_size=args.batch_size,
+                                     shuffle=False, num_workers=args.workers)
+        residual_mae = evaluate_regression(residual_predict, residual_loader, device,
+                                           label=f"Residual DEX{tta_suffix}")
+
     # --- Results ---
     print("\n" + "=" * 45)
     print(f"{'Model':<25} {'Test MAE':>10}  TTA")
@@ -152,11 +176,15 @@ def main():
     print(f"{'Regression':<25} {regress_mae:>10.4f}  {'yes' if args.tta else 'no'}")
     if gaussian_mae is not None:
         print(f"{'Gaussian NLL':<25} {gaussian_mae:>10.4f}  {'yes' if args.tta else 'no'}")
+    if residual_mae is not None:
+        print(f"{'Residual DEX':<25} {residual_mae:>10.4f}  {'yes' if args.tta else 'no'}")
     print("=" * 45)
 
     results = {"Classification": classif_mae, "Regression": regress_mae}
     if gaussian_mae is not None:
         results["Gaussian NLL"] = gaussian_mae
+    if residual_mae is not None:
+        results["Residual DEX"] = residual_mae
     winner = min(results, key=results.get)
     best = results[winner]
     second = sorted(results.values())[1]
