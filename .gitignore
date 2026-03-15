@@ -2,9 +2,10 @@ __pycache__/
 .venv/
 appa-real-release/
 .DS_Store
-misc/epoch044_0.02343_3.9984.pth
+misc/
 tf_log/
 checkpoint/
+*.pth
 output/
 photo/
 CLAUDE.md
