@@ -25,8 +25,8 @@ from tta import TTAWrapper
 def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--data_dir", type=str, required=True)
-    parser.add_argument("--classif_checkpoint", type=str, required=True)
-    parser.add_argument("--regress_checkpoint", type=str, required=True)
+    parser.add_argument("--classif_checkpoint", type=str, default=None)
+    parser.add_argument("--regress_checkpoint", type=str, default=None)
     parser.add_argument("--gaussian_checkpoint", type=str, default=None)
     parser.add_argument("--label_smoothing_checkpoint", type=str, default=None)
     parser.add_argument("--residual_checkpoint", type=str, default=None)
@@ -83,46 +83,52 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tta_suffix = " + TTA" if args.tta else ""
 
-    # --- Classification ---
-    classif_ckpt = torch.load(args.classif_checkpoint, map_location="cpu")
-    arch = classif_ckpt.get("arch", cfg.MODEL.ARCH)
+    arch = cfg.MODEL.ARCH
 
-    classif_model = get_model(model_name=arch, pretrained=None)
-    classif_model.load_state_dict(classif_ckpt["state_dict"])
-    classif_model = classif_model.to(device).eval()
+    # --- Classification (optional) ---
+    classif_mae = None
+    if args.classif_checkpoint:
+        classif_ckpt = torch.load(args.classif_checkpoint, map_location="cpu")
+        arch = classif_ckpt.get("arch", cfg.MODEL.ARCH)
 
-    if args.tta:
-        tta_classif = TTAWrapper(classif_model, mode="classification")
-        classif_predict = lambda x: tta_classif.predict(x)
-    else:
-        classif_predict = lambda x: F.softmax(classif_model(x), dim=-1)
+        classif_model = get_model(model_name=arch, pretrained=None)
+        classif_model.load_state_dict(classif_ckpt["state_dict"])
+        classif_model = classif_model.to(device).eval()
 
-    classif_dataset = FaceDataset(args.data_dir, "test", img_size=cfg.MODEL.IMG_SIZE,
-                                  augment=False, mode="classification")
-    classif_loader = DataLoader(classif_dataset, batch_size=args.batch_size,
-                                shuffle=False, num_workers=args.workers)
-    classif_mae = evaluate_classification(classif_predict, classif_loader, device,
-                                          label=f"Classification{tta_suffix}")
+        if args.tta:
+            tta_classif = TTAWrapper(classif_model, mode="classification")
+            classif_predict = lambda x: tta_classif.predict(x)
+        else:
+            classif_predict = lambda x: F.softmax(classif_model(x), dim=-1)
 
-    # --- Regression ---
-    regress_ckpt = torch.load(args.regress_checkpoint, map_location="cpu")
+        classif_dataset = FaceDataset(args.data_dir, "test", img_size=cfg.MODEL.IMG_SIZE,
+                                      augment=False, mode="classification")
+        classif_loader = DataLoader(classif_dataset, batch_size=args.batch_size,
+                                    shuffle=False, num_workers=args.workers)
+        classif_mae = evaluate_classification(classif_predict, classif_loader, device,
+                                              label=f"Classification{tta_suffix}")
 
-    regress_model = get_regression_model(model_name=arch, pretrained=None)
-    regress_model.load_state_dict(regress_ckpt["state_dict"])
-    regress_model = regress_model.to(device).eval()
+    # --- Regression (optional) ---
+    regress_mae = None
+    if args.regress_checkpoint:
+        regress_ckpt = torch.load(args.regress_checkpoint, map_location="cpu")
 
-    if args.tta:
-        tta_regress = TTAWrapper(regress_model, mode="regression")
-        regress_predict = lambda x: tta_regress.predict(x)
-    else:
-        regress_predict = lambda x: regress_model(x).squeeze(1)
+        regress_model = get_regression_model(model_name=arch, pretrained=None)
+        regress_model.load_state_dict(regress_ckpt["state_dict"])
+        regress_model = regress_model.to(device).eval()
 
-    regress_dataset = FaceDataset(args.data_dir, "test", img_size=cfg.MODEL.IMG_SIZE,
-                                  augment=False, mode="regression")
-    regress_loader = DataLoader(regress_dataset, batch_size=args.batch_size,
-                                shuffle=False, num_workers=args.workers)
-    regress_mae = evaluate_regression(regress_predict, regress_loader, device,
-                                      label=f"Regression{tta_suffix}")
+        if args.tta:
+            tta_regress = TTAWrapper(regress_model, mode="regression")
+            regress_predict = lambda x: tta_regress.predict(x)
+        else:
+            regress_predict = lambda x: regress_model(x).squeeze(1)
+
+        regress_dataset = FaceDataset(args.data_dir, "test", img_size=cfg.MODEL.IMG_SIZE,
+                                      augment=False, mode="regression")
+        regress_loader = DataLoader(regress_dataset, batch_size=args.batch_size,
+                                    shuffle=False, num_workers=args.workers)
+        regress_mae = evaluate_regression(regress_predict, regress_loader, device,
+                                          label=f"Regression{tta_suffix}")
 
     # --- Gaussian (optional) ---
     gaussian_mae = None
@@ -191,30 +197,33 @@ def main():
                                            label=f"Residual DEX{tta_suffix}")
 
     # --- Results ---
-    print("\n" + "=" * 45)
-    print(f"{'Model':<25} {'Test MAE':>10}  TTA")
-    print("-" * 45)
-    print(f"{'Classification':<25} {classif_mae:>10.4f}  {'yes' if args.tta else 'no'}")
-    print(f"{'Regression':<25} {regress_mae:>10.4f}  {'yes' if args.tta else 'no'}")
-    if gaussian_mae is not None:
-        print(f"{'Gaussian NLL':<25} {gaussian_mae:>10.4f}  {'yes' if args.tta else 'no'}")
-    if label_smoothing_mae is not None:
-        print(f"{'Label Smoothing':<25} {label_smoothing_mae:>10.4f}  {'yes' if args.tta else 'no'}")
-    if residual_mae is not None:
-        print(f"{'Residual DEX':<25} {residual_mae:>10.4f}  {'yes' if args.tta else 'no'}")
-    print("=" * 45)
-
-    results = {"Classification": classif_mae, "Regression": regress_mae}
+    results = {}
+    if classif_mae is not None:
+        results["Classification"] = classif_mae
+    if regress_mae is not None:
+        results["Regression"] = regress_mae
     if gaussian_mae is not None:
         results["Gaussian NLL"] = gaussian_mae
     if label_smoothing_mae is not None:
         results["Label Smoothing"] = label_smoothing_mae
     if residual_mae is not None:
         results["Residual DEX"] = residual_mae
-    winner = min(results, key=results.get)
-    best = results[winner]
-    second = sorted(results.values())[1]
-    print(f"=> Best model: {winner} (Δ MAE = {abs(best - second):.4f})")
+
+    print("\n" + "=" * 45)
+    print(f"{'Model':<25} {'Test MAE':>10}  TTA")
+    print("-" * 45)
+    for name, mae in results.items():
+        print(f"{name:<25} {mae:>10.4f}  {'yes' if args.tta else 'no'}")
+    print("=" * 45)
+
+    if len(results) >= 2:
+        winner = min(results, key=results.get)
+        best = results[winner]
+        second = sorted(results.values())[1]
+        print(f"=> Best model: {winner} (Δ MAE = {abs(best - second):.4f})")
+    elif len(results) == 1:
+        name, mae = next(iter(results.items()))
+        print(f"=> {name}: MAE = {mae:.4f}")
 
 
 if __name__ == "__main__":

@@ -75,18 +75,29 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def train_classification(train_loader, model, criterion, optimizer, epoch, device):
+def train_classification(train_loader, model, criterion, optimizer, epoch, device,
+                         uncertainty_weighting=False):
     model.train()
     loss_monitor = AverageMeter()
     accuracy_monitor = AverageMeter()
 
     with tqdm(train_loader) as _tqdm:
-        for x, y in _tqdm:
+        for batch in _tqdm:
+            if uncertainty_weighting:
+                x, y, std = batch
+                std = std.to(device)
+            else:
+                x, y = batch
             x = x.to(device)
             y = y.to(device)
 
             outputs = model(x)
-            loss = criterion(outputs, y)
+            if uncertainty_weighting:
+                per_sample_loss = F.cross_entropy(outputs, y, reduction='none')
+                weights = 1.0 / (std + 1.0)
+                loss = (weights * per_sample_loss).mean()
+            else:
+                loss = criterion(outputs, y)
             cur_loss = loss.item()
 
             _, predicted = outputs.max(1)
@@ -396,8 +407,12 @@ def main():
         cudnn.benchmark = True
 
     # datasets — labels differ between modes
+    uncertainty_weighting = cfg.TRAIN.UNCERTAINTY_WEIGHTING
     train_dataset = FaceDataset(args.data_dir, "train", img_size=cfg.MODEL.IMG_SIZE, augment=True,
-                                age_stddev=cfg.TRAIN.AGE_STDDEV, mode=mode)
+                                age_stddev=cfg.TRAIN.AGE_STDDEV, mode=mode,
+                                return_std=uncertainty_weighting)
+    if uncertainty_weighting:
+        print("=> uncertainty weighting enabled: loss weighted by 1/(human_std + 1)")
 
     if cfg.TRAIN.BALANCED_SAMPLING:
         # WeightedRandomSampler: weight = 1/count of the age bin (10-year bins)
@@ -446,7 +461,8 @@ def main():
 
     for epoch in range(start_epoch, cfg.TRAIN.EPOCHS):
         if mode == "classification":
-            train_loss, train_acc = train_classification(train_loader, model, criterion, optimizer, epoch, device)
+            train_loss, train_acc = train_classification(train_loader, model, criterion, optimizer, epoch, device,
+                                                            uncertainty_weighting=uncertainty_weighting)
             val_loss, val_acc, val_mae = validate_classification(val_loader, model, criterion, epoch, device)
         elif mode == "regression":
             train_loss = train_regression(train_loader, model, criterion, optimizer, epoch, device)

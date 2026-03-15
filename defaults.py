@@ -22,6 +22,7 @@ _C.TRAIN.EPOCHS = 80
 _C.TRAIN.AGE_STDDEV = 1.0
 _C.TRAIN.LABEL_SMOOTHING = 0.0  # sigma (in years) for Gaussian label smoothing; 0 = off
 _C.TRAIN.BALANCED_SAMPLING = False  # oversample rare ages via WeightedRandomSampler
+_C.TRAIN.UNCERTAINTY_WEIGHTING = False  # weight loss by 1/(human_std + eps) — down-weight ambiguous faces
 
 # Test
 _C.TEST = CN()

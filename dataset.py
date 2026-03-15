@@ -38,7 +38,8 @@ class ImgAugTransform:
 
 
 class FaceDataset(Dataset):
-    def __init__(self, data_dir, data_type, img_size=224, augment=False, age_stddev=1.0, mode="classification"):
+    def __init__(self, data_dir, data_type, img_size=224, augment=False, age_stddev=1.0, mode="classification",
+                 return_std=False):
         assert(data_type in ("train", "valid", "test"))
         csv_path = Path(data_dir).joinpath(f"gt_avg_{data_type}.csv")
         img_dir = Path(data_dir).joinpath(data_type)
@@ -46,6 +47,7 @@ class FaceDataset(Dataset):
         self.augment = augment
         self.age_stddev = age_stddev
         self.mode = mode
+        self.return_std = return_std
 
         if augment:
             self.transform = ImgAugTransform()
@@ -84,10 +86,15 @@ class FaceDataset(Dataset):
         img = cv2.imread(str(img_path), 1)
         img = cv2.resize(img, (self.img_size, self.img_size))
         img = self.transform(img).astype(np.float32)
+        img_tensor = torch.from_numpy(np.transpose(img, (2, 0, 1)))
         if self.mode in ("regression", "gaussian", "residual_dex"):
-            return torch.from_numpy(np.transpose(img, (2, 0, 1))), np.float32(np.clip(age, 0, 100))
+            label = np.float32(np.clip(age, 0, 100))
         else:
-            return torch.from_numpy(np.transpose(img, (2, 0, 1))), np.clip(round(age), 0, 100)
+            label = np.clip(round(age), 0, 100)
+
+        if self.return_std:
+            return img_tensor, label, np.float32(self.std[idx])
+        return img_tensor, label
 
 
 def main():
