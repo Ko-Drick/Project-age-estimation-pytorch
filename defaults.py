@@ -21,6 +21,7 @@ _C.TRAIN.BATCH_SIZE = 128
 _C.TRAIN.EPOCHS = 80
 _C.TRAIN.AGE_STDDEV = 1.0
 _C.TRAIN.LABEL_SMOOTHING = 0.0  # sigma (in years) for Gaussian label smoothing; 0 = off
+_C.TRAIN.BALANCED_SAMPLING = False  # oversample rare ages via WeightedRandomSampler
 
 # Test
 _C.TEST = CN()

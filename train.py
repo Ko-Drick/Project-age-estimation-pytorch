@@ -11,7 +11,7 @@ import torch.backends.cudnn as cudnn
 import torch.optim
 from torch.optim.lr_scheduler import StepLR
 import torch.utils.data
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import pretrainedmodels
@@ -398,8 +398,21 @@ def main():
     # datasets — labels differ between modes
     train_dataset = FaceDataset(args.data_dir, "train", img_size=cfg.MODEL.IMG_SIZE, augment=True,
                                 age_stddev=cfg.TRAIN.AGE_STDDEV, mode=mode)
-    train_loader = DataLoader(train_dataset, batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True,
-                              num_workers=cfg.TRAIN.WORKERS, drop_last=True)
+
+    if cfg.TRAIN.BALANCED_SAMPLING:
+        # WeightedRandomSampler: weight = 1/count of the age bin (10-year bins)
+        ages = np.array(train_dataset.y)
+        bin_edges = np.arange(0, 110, 10)  # [0,10,20,...,100]
+        bin_idx = np.digitize(ages, bin_edges) - 1  # bin index per sample
+        bin_counts = np.bincount(bin_idx, minlength=len(bin_edges) - 1)
+        sample_weights = 1.0 / bin_counts[bin_idx]
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_dataset), replacement=True)
+        print(f"=> balanced sampling enabled (bin counts: {bin_counts})")
+        train_loader = DataLoader(train_dataset, batch_size=cfg.TRAIN.BATCH_SIZE, sampler=sampler,
+                                  num_workers=cfg.TRAIN.WORKERS, drop_last=True)
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True,
+                                  num_workers=cfg.TRAIN.WORKERS, drop_last=True)
 
     val_dataset = FaceDataset(args.data_dir, "valid", img_size=cfg.MODEL.IMG_SIZE, augment=False, mode=mode)
     val_loader = DataLoader(val_dataset, batch_size=cfg.TEST.BATCH_SIZE, shuffle=False,
