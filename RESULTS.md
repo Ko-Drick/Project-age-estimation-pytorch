@@ -30,16 +30,3 @@
 
 TTA : 4 transforms (original, hflip, crop 90%, hflip+crop).
 Ensemble : moyenne des prédictions Classification + Regression + Gaussian.
-
-## Analyse de l'overfitting (gap val/test)
-
-| Modèle | Val MAE | Test MAE | Gap |
-|---|---|---|---|
-| Classification (DEX) | 3.961 | 4.639 | 0.678 |
-| Regression (L1) | 3.955 | 4.647 | 0.692 |
-| Gaussian NLL | 4.075 | 4.712 | 0.637 |
-| Label Smoothing (σ=2) | 3.960 | 4.708 | 0.748 |
-| DEX + Weight Decay (1e-4) | 3.876 | 4.722 | 0.846 |
-| DEX + Balanced Sampling | 4.117 | 4.772 | 0.655 |
-| DEX + Uncertainty Weighting | 3.967 | 5.006 | 1.039 |
-| Residual DEX | 4.267 | 4.968 | 0.701 |
