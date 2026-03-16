@@ -11,6 +11,7 @@
 | DEX + Weight Decay (1e-4) | `checkpoint/classification/epoch077_0.02320_3.8761.pth` | 80 | 3.876 |
 | DEX + Balanced Sampling | `checkpoint/epoch062_0.02368_4.1170_BALANCED_SAMPLING.pth` | 80 | 4.117 |
 | DEX + Uncertainty Weighting | `checkpoint/uncertainty_weighting/epoch072_0.02352_3.9670.pth` | 80 | 3.967 |
+| Residual DEX | `checkpoint/epoch078_0.03407_4.2666_Residual_DEX.pth` | 78 | 4.267 |
 
 ## Test MAE (APPA-REAL test set)
 
@@ -21,10 +22,10 @@
 | Regression (L1) | 4.647 | 4.442 |
 | Gaussian NLL | 4.712 | 4.501 |
 | Label Smoothing (σ=2) | 4.708 | 4.561 |
-| DEX + Weight Decay (1e-4) | 4.722 | TBD |
+| DEX + Weight Decay (1e-4) | 4.722 | 4.600 |
 | DEX + Balanced Sampling | 4.995 | 4.772 |
 | DEX + Uncertainty Weighting | 5.006 | 4.843 |
-| Residual DEX | TBD | TBD |
+| Residual DEX | 4.968 | 4.700 |
 
 TTA : 4 transforms (original, hflip, crop 90%, hflip+crop).
 
@@ -39,6 +40,7 @@ TTA : 4 transforms (original, hflip, crop 90%, hflip+crop).
 | DEX + Weight Decay (1e-4) | 3.876 | 4.722 | 0.846 |
 | DEX + Balanced Sampling | 4.117 | 4.772 | 0.655 |
 | DEX + Uncertainty Weighting | 3.967 | 5.006 | 1.039 |
+| Residual DEX | 4.267 | 4.968 | 0.701 |
 
 Le gap val/test est constant (~0.7 MAE) et ne diminue pas avec la régularisation (weight decay, label smoothing). Cela suggère un **décalage de distribution** entre les splits val et test d'APPA-REAL plutôt qu'un overfitting classique. L'optimisation du checkpoint sur le val set n'est pas un bon proxy pour la performance test.
 
@@ -69,4 +71,4 @@ Le modèle optimise principalement sur la tranche 20-30 ans (dominante dans trai
 - [x] **Weight Decay (1e-4)** — meilleur val MAE (3.876 vs 3.961) mais test MAE dégradé (4.722 vs 4.639). Le gap val/test augmente (0.846 vs 0.678), confirmant que le problème n'est pas un overfitting classique mais un décalage de distribution val/test dans APPA-REAL.
 - [x] **Balanced Sampling** — `WeightedRandomSampler` avec bins de 10 ans pour suréchantillonner les âges rares. Val MAE dégradé (4.117 vs 3.961) et test MAE+TTA dégradé (4.772 vs 4.459). Le rééquilibrage force le modèle à sur-représenter les âges extrêmes (peu d'exemples, haute variance) au détriment de la tranche majoritaire 20-40 ans. Le gap val/test (0.655) est néanmoins le plus bas de tous les modèles, ce qui confirme que le balanced sampling réduit le biais de distribution — mais au prix d'une MAE globale plus élevée. Trade-off classique entre équité par tranche d'âge et performance moyenne.
 - [x] **Uncertainty Weighting** — pondération de la loss par `1/(human_std + 1)` pour down-weight les images ambiguës (fort désaccord humain). Val MAE légèrement meilleur (3.967 vs 3.961) mais **pire test MAE** (5.006 vs 4.639) et **plus grand gap val/test** (1.039). Explication : les images à fort std humain sont souvent les âges extrêmes, sur-représentés dans le test set. En les down-weightant, le modèle se spécialise encore plus sur les 20-40 ans et perd en généralisation. Résultat négatif mais instructif.
-- [ ] **Residual DEX** — en cours d'entraînement.
+- [x] **Residual DEX** — chaque classe prédit un résidu en plus de la probabilité softmax, permettant des prédictions continues sans passer par la régression pure. Val MAE 4.267, test MAE 4.968 (4.700 avec TTA). Moins bon que le DEX baseline, probablement car le modèle a plus de paramètres à optimiser (double tête) pour un gain théorique limité sur ce dataset.
